@@ -22,12 +22,15 @@ if ($all -eq "Deny" -or $desk -eq "Deny") {
   Say "    'Microphone access' AND 'Let desktop apps access your microphone'." "Yellow"
 }
 
-# refresh the speech engine script (adds per-press logging) and test the mic
+# refresh the speech engine + voice player to the latest fixes, then test the mic
 $ears = Join-Path $Dir "voice\ears.py"
-try {
-  Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/TheSunMan123/terminal-jarvis/main/voice/ears.py" -OutFile "$ears.new"
-  Move-Item "$ears.new" $ears -Force
-} catch { Say "  (could not refresh ears.py: $($_.Exception.Message))" "DarkGray" }
+foreach ($f in "ears.py", "speak-worker.ps1") {
+  $dst = Join-Path $Dir "voice\$f"
+  try {
+    Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/TheSunMan123/terminal-jarvis/main/voice/$f" -OutFile "$dst.new"
+    Move-Item "$dst.new" $dst -Force
+  } catch { Say "  (could not refresh $f : $($_.Exception.Message))" "DarkGray" }
+}
 if ($state.uv_exe -and (Test-Path $state.uv_exe)) {
   Say ""
   $env:UV_SYSTEM_CERTS = "1"

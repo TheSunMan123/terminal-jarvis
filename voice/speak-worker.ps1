@@ -7,11 +7,39 @@ $state = Get-Content (Join-Path $Dir "state.json") -Raw | ConvertFrom-Json
 $log = Join-Path $Dir "voice.log"
 function Log($m) { Add-Content -Path $log -Value ("{0:yyyy-MM-dd HH:mm:ss} {1}" -f (Get-Date), $m) }
 
+# Playback goes through Windows Media Foundation (the modern WASAPI audio path Windows itself uses).
+# The older winmm path (SoundPlayer, and SAPI speaking directly) plays pure silence on some laptops
+# (Intel Smart Sound), so it's only the fallback.
+function Play-File($path) {
+  try {
+    Add-Type -AssemblyName PresentationCore
+    $p = New-Object System.Windows.Media.MediaPlayer
+    $p.Volume = 1.0
+    $p.Open([Uri]$path)
+    $t0 = Get-Date
+    while (-not $p.NaturalDuration.HasTimeSpan) {
+      if (((Get-Date) - $t0).TotalSeconds -gt 5) { throw "media player could not open the audio" }
+      Start-Sleep -Milliseconds 50
+    }
+    $len = $p.NaturalDuration.TimeSpan.TotalMilliseconds
+    $p.Play()
+    Start-Sleep -Milliseconds ([int]$len + 250)
+    $p.Close()
+    Log ("played {0:N1}s via Media Foundation" -f ($len / 1000))
+  } catch {
+    Log "Media Foundation playback failed ($($_.Exception.Message)); using the old player"
+    (New-Object System.Media.SoundPlayer $path).PlaySync()
+  }
+}
+
 function Speak-Windows($t) {
   Add-Type -AssemblyName System.Speech
   $s = New-Object System.Speech.Synthesis.SpeechSynthesizer
   try { $s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::Male) } catch {}
-  $s.Rate = 0; $s.Speak($t); $s.Dispose()
+  $s.Rate = 0
+  $wav = Join-Path $Dir "reply-windows.wav"
+  $s.SetOutputToWaveFile($wav); $s.Speak($t); $s.SetOutputToNull(); $s.Dispose()
+  Play-File $wav
 }
 
 if ($state.voice -eq "fish") {
@@ -28,7 +56,7 @@ if ($state.voice -eq "fish") {
       -Headers @{ Authorization = "Bearer $key"; model = $(if ($state.fish_model) { $state.fish_model } else { "s1" }) } `
       -ContentType "application/json; charset=utf-8" -Body ([Text.Encoding]::UTF8.GetBytes($body)) -OutFile $wav
     Log ("fish ok {0:N1}s, {1} chars" -f ((Get-Date) - $t0).TotalSeconds, $text.Length)
-    (New-Object System.Media.SoundPlayer $wav).PlaySync()
+    Play-File $wav
     exit 0
   } catch {
     Log "fish failed, using Windows voice: $($_.Exception.Message)"
