@@ -211,10 +211,11 @@ class Ears:
         self.loaded.wait()
         if self.model is None:
             raise RuntimeError("speech model failed to load: %s" % self.load_error)
+        t0 = time.time()
         segs, _ = self.model.transcribe(audio, language="en", beam_size=1, vad_filter=True,
                                         condition_on_previous_text=False, without_timestamps=True)
         text = " ".join(s.text.strip() for s in segs).strip()
-        diag("%.1fs via %s, peak %.3f -> %r" % (len(audio) / RATE, route, peak, text))
+        diag("%.1fs via %s, peak %.3f, recognised in %.1fs -> %r" % (len(audio) / RATE, route, peak, time.time() - t0, text))
         # Whisper's habit on near-silence
         if text.lower().strip(" .!") in ("", "you", "thank you", "thanks for watching"):
             return ""

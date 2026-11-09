@@ -47,6 +47,7 @@ public class TJHud : Form {
   static readonly Color CY = Color.FromArgb(63, 216, 255), GOLD = Color.FromArgb(255, 194, 71), RED = Color.FromArgb(255, 77, 61),
     DIM = Color.FromArgb(107, 130, 153), TXT = Color.FromArgb(234, 241, 248), BG = Color.FromArgb(6, 16, 27), EDGE = Color.FromArgb(90, 255, 194, 71);
 
+  public static void TestInit(string title) { Title = title; Codex = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex"); }
   public static void Start(string title) {
     SetProcessDPIAware();
     Title = title; Codex = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
@@ -245,7 +246,7 @@ public class TJHud : Form {
     var m = Regex.Match(s, "\"" + key + "\":(-?[0-9.]+)");
     double v; return m.Success && double.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out v) ? v : double.NaN;
   }
-  static string Newest() {
+  public static string Newest() {
     string best = null; DateTime bt = DateTime.MinValue;
     for (int d = 0; d < 3; d++) {
       var day = DateTime.Now.AddDays(-d);
@@ -326,13 +327,7 @@ public static class TJPtt {
           try { text = Encoding.UTF8.GetString(Convert.FromBase64String(line.Length > 5 ? line.Substring(5).Trim() : "")); } catch { }
           State = "";
           text = text.Replace("\r", " ").Replace("\n", " ").Trim();
-          if (text.Length > 0 && TJHud.IsJarvis(GetForegroundWindow())) {
-            TypeText(text);
-            // Codex treats a fast burst of characters as a paste and turns an Enter that follows too soon
-            // into a new line. Wait until the burst has settled, then press Enter to send.
-            // (tested: 60 ms -> becomes a new line, 450 ms -> sends; longer text takes the terminal longer to pass on)
-            if (AutoSend) { Thread.Sleep(Math.Min(1500, SendDelayMs + 3 * text.Length)); if (TJHud.IsJarvis(GetForegroundWindow())) PressEnter(); }
-          }
+          if (text.Length > 0 && TJHud.IsJarvis(GetForegroundWindow())) Deliver(text, Math.Min(1500, SendDelayMs + 3 * text.Length));
         } else if (line.StartsWith("ERROR")) {
           Log("ears: " + line); State = "MIC ERROR"; ThreadPool.QueueUserWorkItem(x => { Thread.Sleep(2500); if (State == "MIC ERROR") State = ""; });
         } else if (line == "READY" && State == "WARMING UP") State = "";
@@ -341,6 +336,53 @@ public static class TJPtt {
     if (State != "") State = "";
   }
   public static int SendDelayMs = 450;
+  // Types the words into the Jarvis window and makes sure Codex sends them.
+  // Codex treats a fast burst of characters as a paste and turns an Enter that follows too soon into a new
+  // line (tested: 60 ms -> new line, 450 ms -> sent). So: wait for the burst to settle, press Enter, then
+  // CHECK Codex's session record; if the message didn't go, press Enter again (an Enter on an empty prompt
+  // does nothing, so the retry is harmless). Returns what happened (also logged).
+  public static string Deliver(string text, int firstDelayMs) {
+    var sw = Stopwatch.StartNew();
+    string rollout = TJHud.Newest(); long mark = SizeOf(rollout);
+    TypeText(text);
+    string how = "typed only";
+    if (AutoSend) {
+      Thread.Sleep(firstDelayMs);
+      how = "not sent (window lost focus)";
+      for (int attempt = 1; attempt <= 3 && TJHud.IsJarvis(GetForegroundWindow()); attempt++) {
+        PressEnter();
+        if (Submitted(rollout, mark, text, 1400)) { how = "sent" + (attempt > 1 ? " on Enter #" + attempt : ""); break; }
+        how = "not confirmed after " + attempt + " Enter(s)";
+      }
+    }
+    Log("ptt: " + how + " (" + text.Length + " chars, " + sw.ElapsedMilliseconds + " ms after the words arrived)");
+    return how;
+  }
+  public static void TestInit(string title, string statePath) { TJHud.TestInit(title); LogPath = Path.Combine(Path.GetDirectoryName(statePath), "ears.log"); }
+  static long SizeOf(string f) { try { return f == null ? 0 : new FileInfo(f).Length; } catch { return 0; } }
+  // Did Codex record this message as a new turn? Looks only at what was appended to its newest session file
+  // since we started typing (a brand-new session file counts too).
+  static bool Submitted(string rollout, long mark, string text, int waitMs) {
+    var m = Regex.Match(text, "[A-Za-z0-9][A-Za-z0-9 ,.']{6,30}");
+    if (!m.Success) return true;              // nothing safely searchable: don't risk extra Enters
+    string probe = m.Value.Trim();
+    var until = DateTime.Now.AddMilliseconds(waitMs);
+    while (DateTime.Now < until) {
+      Thread.Sleep(120);
+      try {
+        string f = TJHud.Newest(); if (f == null) continue;
+        long from = f == rollout ? mark : 0, len = SizeOf(f);
+        if (len <= from) continue;
+        using (var fs = new FileStream(f, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) {
+          fs.Seek(Math.Max(from, len - 400000), SeekOrigin.Begin);
+          string added = new StreamReader(fs, Encoding.UTF8).ReadToEnd();
+          // Codex versions record a sent message as "role":"user" / UserMessage / user_message
+          if ((added.Contains("\"role\":\"user\"") || added.Contains("UserMessage") || added.Contains("user_message")) && added.Contains(probe)) return true;
+        }
+      } catch { }
+    }
+    return false;
+  }
   static void PressEnter() {
     var d = new INPUT { type = 1 }; d.u.ki = new KEYBDINPUT { vk = 0x0D, scan = 0x1C, flags = 0 };
     var u = new INPUT { type = 1 }; u.u.ki = new KEYBDINPUT { vk = 0x0D, scan = 0x1C, flags = 0x0002 };
