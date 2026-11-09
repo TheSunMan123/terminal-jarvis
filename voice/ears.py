@@ -390,12 +390,24 @@ def mac(ears, state, home):
     typer = keyboard.Controller()
     held = {"down": False, "active": False}
 
-    def front_is_terminal():
+    def front_bundle():
+        # NSWorkspace never refreshes in a process without an AppKit run loop (it keeps answering with
+        # whatever was in front the first time), so ask macOS's lsappinfo; NSWorkspace is only the fallback.
         try:
-            app = NSWorkspace.sharedWorkspace().frontmostApplication()
-            return str(app.bundleIdentifier()) in TERMINALS
+            asn = subprocess.run(["lsappinfo", "front"], capture_output=True, text=True, timeout=1).stdout.strip()
+            out = subprocess.run(["lsappinfo", "info", "-only", "bundleID", asn],
+                                 capture_output=True, text=True, timeout=1).stdout
+            if "=" in out:
+                return out.split("=", 1)[1].strip().strip('"')
         except Exception:
-            return False
+            pass
+        try:
+            return str(NSWorkspace.sharedWorkspace().frontmostApplication().bundleIdentifier())
+        except Exception:
+            return ""
+
+    def front_is_terminal():
+        return front_bundle() in TERMINALS
 
     def chime(sound):
         try:
@@ -412,13 +424,17 @@ def mac(ears, state, home):
             chime("Basso")
             return
         if not text:
+            log("ptt: heard nothing (check the Microphone permission for your terminal app)")
             return
         if not front_is_terminal():
             log("terminal no longer in front; dropped: %r" % text)
             return
         typer.type(text)
+        log("ptt: typed %d chars" % len(text))
         if auto_send:
-            time.sleep(0.08)
+            # Codex treats an Enter right after fast typing as part of a paste (a newline, not send):
+            # same wait as the Windows HUD, which was tested live.
+            time.sleep(min(1.5, 0.45 + 0.003 * len(text)))
             typer.press(keyboard.Key.enter)
             typer.release(keyboard.Key.enter)
         chime("Pop")
@@ -427,7 +443,9 @@ def mac(ears, state, home):
         if key != talk or held["down"]:
             return
         held["down"] = True
-        if front_is_terminal():
+        front = front_bundle()
+        log("ptt: key down (front app %s)" % (front or "unknown"))
+        if front in TERMINALS:
             try:
                 ears.start()
                 held["active"] = True
