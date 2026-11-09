@@ -315,13 +315,16 @@ if ($state.ptt_key -ne "none" -and $PttEngine -eq "whisper") {
   }
   if (-not $uvExe) {
     Say "  Setting up the speech engine (uv, a small Python runner from astral.sh)..." "DarkGray"
-    try {
-      $env:UV_UNMANAGED_INSTALL = (Join-Path $InstallDir "uv")   # private copy: no PATH changes, removed by uninstall
-      $uvScript = Invoke-RestMethod -UseBasicParsing "https://astral.sh/uv/install.ps1"
-      & ([scriptblock]::Create($uvScript)) | Out-Null
-      Remove-Item Env:UV_UNMANAGED_INSTALL -ErrorAction SilentlyContinue
-      if (Test-Path (Join-Path $InstallDir "uv\uv.exe")) { $uvExe = Join-Path $InstallDir "uv\uv.exe" }
-    } catch { Say "  ! Could not download uv: $($_.Exception.Message)" "Yellow" }
+    # In its OWN PowerShell process: astral's script calls 'exit' on any error, which would otherwise end
+    # this installer halfway (new files copied, settings never saved).
+    $uvDir = Join-Path $InstallDir "uv"   # private copy: no PATH changes, removed by uninstall
+    $uvCmd = "`$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072; " +
+             "`$env:UV_UNMANAGED_INSTALL='$uvDir'; irm https://astral.sh/uv/install.ps1 | iex"
+    $eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    $uvOut = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command $uvCmd 2>&1 | ForEach-Object { "$_" }
+    $ErrorActionPreference = $eap
+    if (Test-Path (Join-Path $uvDir "uv.exe")) { $uvExe = Join-Path $uvDir "uv.exe" }
+    else { Say "  ! Could not set up uv:" "Yellow"; $uvOut | Select-Object -Last 4 | ForEach-Object { Say "    $_" "DarkGray" } }
   }
   $ok = $false
   if ($uvExe) {
