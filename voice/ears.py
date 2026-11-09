@@ -53,8 +53,62 @@ def load_state(path):
         return {}
 
 
+API_ORDER = ("Windows WASAPI", "Windows DirectSound", "MME", "Windows WDM-KS")
+
+
+def mic_candidates(preferred=None):
+    """The default microphone as seen through each audio route ("host API"), best first.
+
+    Some laptop mics (Intel Smart Sound arrays) give pure digital silence through the old MME route
+    that PortAudio uses by default, but work through WASAPI, the route Windows itself uses.
+    Returns [(api_name, device_index)]."""
+    import sounddevice as sd
+
+    devs, apis = sd.query_devices(), sd.query_hostapis()
+    try:
+        default_in = int(sd.query_devices(kind="input")["index"])
+    except Exception:
+        default_in = next((i for i, d in enumerate(devs) if d["max_input_channels"] > 0), -1)
+    if default_in < 0:
+        return []
+    if sys.platform != "win32":
+        return [(apis[devs[default_in]["hostapi"]]["name"], default_in)]
+    base = devs[default_in]["name"]
+    stem = base[:24].lower()   # MME cuts names at 31 characters
+    out = []
+    for api in API_ORDER:
+        for i, d in enumerate(devs):
+            if d["max_input_channels"] > 0 and apis[d["hostapi"]]["name"] == api and \
+                    (d["name"].lower().startswith(stem) or base.lower().startswith(d["name"][:24].lower())):
+                out.append((api, i))
+                break
+    if not any(i == default_in for _, i in out):
+        out.append((apis[devs[default_in]["hostapi"]]["name"], default_in))
+    if preferred:
+        out.sort(key=lambda c: c[0] != preferred)
+    return out
+
+
+def to_16k(chunks, rate):
+    """Join callback blocks, keep the loudest channel, resample to 16 kHz mono."""
+    import numpy as np
+
+    a = np.concatenate(chunks)
+    if a.ndim == 2:
+        a = a[:, int(np.abs(a).max(axis=0).argmax())]
+    a = a.astype("float32")
+    if rate != RATE and len(a):
+        if rate % RATE == 0:   # 48 kHz -> 16 kHz: average each group of 3 (cheap low-pass)
+            k = rate // RATE
+            a = a[: len(a) // k * k].reshape(-1, k).mean(axis=1)
+        else:
+            n = int(len(a) * RATE / rate)
+            a = np.interp(np.arange(n) * (rate / RATE), np.arange(len(a)), a).astype("float32")
+    return a
+
+
 class Ears:
-    def __init__(self, model_name, models_dir):
+    def __init__(self, model_name, models_dir, mic_api=None):
         self.model_name = model_name or "base.en"
         self.models_dir = models_dir
         self.model = None
@@ -62,7 +116,22 @@ class Ears:
         self.load_error = None
         self.chunks = []
         self.stream = None
+        self.rate = RATE
         self.lock = threading.Lock()
+        self.mic_api = mic_api
+        self.cands = None
+        self.cur = 0
+
+    def open_stream(self, cand, cb):
+        import sounddevice as sd
+
+        api, idx = cand
+        d = sd.query_devices(idx)
+        rate = int(d["default_samplerate"]) or RATE
+        ch = max(1, min(2, int(d["max_input_channels"])))
+        s = sd.InputStream(device=idx, samplerate=rate, channels=ch, dtype="float32", callback=cb)
+        s.start()
+        return s, rate
 
     def load(self):
         try:
@@ -77,18 +146,29 @@ class Ears:
             self.loaded.set()
 
     def start(self):
-        import sounddevice as sd
-
         with self.lock:
             if self.stream is not None:
                 return
             self.chunks = []
 
             def cb(indata, frames, t, status):  # noqa: ARG001
-                self.chunks.append(indata[:, 0].copy())
+                self.chunks.append(indata.copy())
 
-            self.stream = sd.InputStream(samplerate=RATE, channels=1, dtype="float32", callback=cb)
-            self.stream.start()
+            if self.cands is None:
+                self.cands = mic_candidates(self.mic_api)
+            if not self.cands:
+                raise RuntimeError("no microphone found")
+            last = None
+            for _ in range(len(self.cands)):   # a route that won't open -> the next one
+                cand = self.cands[self.cur % len(self.cands)]
+                try:
+                    self.stream, self.rate = self.open_stream(cand, cb)
+                    return
+                except Exception as e:  # noqa: BLE001
+                    last = e
+                    diag("could not open the mic via %s: %s" % (cand[0], e))
+                    self.cur += 1
+            raise RuntimeError("could not open the microphone: %s" % last)
 
     def stop(self):
         import numpy as np
@@ -105,22 +185,28 @@ class Ears:
         if not self.chunks:
             diag("no audio arrived from the microphone")
             return ""
-        audio = np.concatenate(self.chunks)
+        audio = to_16k(self.chunks, self.rate)
         self.chunks = []
         peak = float(np.abs(audio).max()) if len(audio) else 0.0
+        route = self.cands[self.cur % len(self.cands)][0] if self.cands else "?"
         if len(audio) < RATE * 0.35:  # a tap, not speech
             diag("too short (%.2fs)" % (len(audio) / RATE))
             return ""
+        if peak == 0.0 and self.cands and len(self.cands) > 1:
+            # digital silence: this route is dead for this mic. Use the next one from the next press on.
+            self.cur += 1
+            diag("pure silence via %s; switching to %s for the next press" % (route, self.cands[self.cur % len(self.cands)][0]))
+            return ""
         if peak < 0.003:
-            diag("%.1fs recorded but it is silent (peak %.4f): microphone muted, blocked by Windows privacy, "
-                 "or the wrong input device" % (len(audio) / RATE, peak))
+            diag("%.1fs recorded via %s but it is silent (peak %.4f): microphone muted (laptop mic-mute key?), "
+                 "or the wrong input device" % (len(audio) / RATE, route, peak))
         self.loaded.wait()
         if self.model is None:
             raise RuntimeError("speech model failed to load: %s" % self.load_error)
         segs, _ = self.model.transcribe(audio, language="en", beam_size=5, vad_filter=True,
                                         condition_on_previous_text=False)
         text = " ".join(s.text.strip() for s in segs).strip()
-        diag("%.1fs, peak %.3f -> %r" % (len(audio) / RATE, peak, text))
+        diag("%.1fs via %s, peak %.3f -> %r" % (len(audio) / RATE, route, peak, text))
         # Whisper's habit on near-silence
         if text.lower().strip(" .!") in ("", "you", "thank you", "thanks for watching"):
             return ""
@@ -136,33 +222,64 @@ def diag(m):
         pass
 
 
-def selftest(ears):
+def selftest(ears, state_path):
+    """Record ~3 s through each audio route for the default mic, show the loudness of each, transcribe the
+    best one and remember its route in state.json (mic_api) so push-to-talk uses it first."""
     import numpy as np
     import sounddevice as sd
 
     print("  Microphone test", flush=True)
     try:
-        dev = sd.query_devices(kind="input")
-        print("  Input device : %s" % dev["name"], flush=True)
+        cands = mic_candidates()
     except Exception as e:  # noqa: BLE001
-        print("  ! No input device: %s" % e, flush=True)
+        print("  ! Could not list microphones: %s" % e, flush=True)
         return
-    threading.Thread(target=ears.load, daemon=True).start()
-    print("  Speak now for 4 seconds...", flush=True)
+    if not cands:
+        print("  ! No microphone found.", flush=True)
+        return
+    print("  Microphone   : %s" % sd.query_devices(cands[0][1])["name"], flush=True)
     try:
-        rec = sd.rec(int(4 * RATE), samplerate=RATE, channels=1, dtype="float32")
-        sd.wait()
-    except Exception as e:  # noqa: BLE001
-        print("  ! Could not record: %s" % e, flush=True)
+        print("  Speakers     : %s  (where Jarvis's voice plays)" % sd.query_devices(kind="output")["name"], flush=True)
+    except Exception:
+        pass
+    threading.Thread(target=ears.load, daemon=True).start()
+    secs = 3.0
+    print("  Keep talking (count slowly from one to twenty) while it tries %d audio route(s)..." % len(cands), flush=True)
+    results = []
+    for api, idx in cands:
+        chunks = []
+        try:
+            s, rate = ears.open_stream((api, idx), lambda d, f, t, st: chunks.append(d.copy()))
+            time.sleep(secs)
+            s.stop()
+            s.close()
+            a = to_16k(chunks, rate) if chunks else np.zeros(0, dtype="float32")
+            peak = float(np.abs(a).max()) if len(a) else 0.0
+        except Exception as e:  # noqa: BLE001
+            print("    %-20s  could not open (%s)" % (api, str(e).splitlines()[0][:60]), flush=True)
+            continue
+        print("    %-20s  loudness %.3f  [%-30s]" % (api, peak, "#" * min(30, int(peak * 60))), flush=True)
+        results.append((peak, api, a))
+    if not results:
+        print("  ! No audio route could open the microphone.", flush=True)
         return
-    a = rec[:, 0]
-    peak = float(np.abs(a).max())
-    bar = "#" * min(40, int(peak * 80))
-    print("  Loudness     : %.3f  [%-40s]" % (peak, bar), flush=True)
+    best = max(r[0] for r in results)
+    # routes are listed best-first (WASAPI first); take the first one that hears about as well as the loudest,
+    # so room noise doesn't steer the choice to an older route
+    peak, api, a = next(r for r in results if r[0] >= max(0.003, 0.5 * best)) if best >= 0.003 else max(results, key=lambda r: r[0])
     if peak < 0.003:
-        print("  ! Silent. Check: Settings > Privacy & security > Microphone > 'Let desktop apps access", flush=True)
-        print("    your microphone' is ON; the mic isn't muted; and Settings > System > Sound > Input", flush=True)
-        print("    has the right microphone selected.", flush=True)
+        print("  ! Every route is silent. The mic is muted or switched off: check the laptop's mic-mute key", flush=True)
+        print("    (often F4 or F8 with a little light), Settings > System > Sound > Input (right mic, volume up,", flush=True)
+        print("    not muted), and Privacy & security > Microphone.", flush=True)
+        return
+    try:
+        st = load_state(state_path)
+        st["mic_api"] = api
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump(st, f, indent=2)
+        print("  Using        : %s (saved; push-to-talk will use it)" % api, flush=True)
+    except Exception as e:  # noqa: BLE001
+        print("  (could not save the choice: %s)" % e, flush=True)
     ears.loaded.wait()
     if ears.model is None:
         print("  ! Speech model failed to load: %s" % ears.load_error, flush=True)
@@ -361,7 +478,7 @@ def main():
     a = ap.parse_args()
     home = os.path.dirname(os.path.abspath(a.state))
     state = load_state(a.state)
-    ears = Ears(a.model or state.get("stt_model", "base.en"), os.path.join(home, "models"))
+    ears = Ears(a.model or state.get("stt_model", "base.en"), os.path.join(home, "models"), state.get("mic_api"))
     if a.warmup:
         print("  Downloading the speech model (%s) - first time only..." % ears.model_name, flush=True)
         ears.load()
@@ -373,7 +490,7 @@ def main():
         list(ears.model.transcribe(np.zeros(RATE, dtype="float32"), language="en")[0])
         print("READY", flush=True)
     elif a.test:
-        selftest(ears)
+        selftest(ears, a.state)
     elif a.serve:
         serve(ears)
     else:

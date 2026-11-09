@@ -46,6 +46,15 @@ $ErrorActionPreference = $eap
 $out = $null
 try { Add-Type -AssemblyName System.Speech; $out = (New-Object System.Speech.Synthesis.SpeechSynthesizer).GetInstalledVoices().Count } catch { }
 Say ("  Windows voices installed: {0}" -f $out) "White"
+Say "  Didn't hear it? If the log below says 'fish ok', the voice was made and played: check the volume," "DarkGray"
+Say "  that the laptop isn't muted, and that the 'Speakers' line above is the device you're listening on" "DarkGray"
+Say "  (Bluetooth headphones, a monitor or a dock can quietly take over the sound)." "DarkGray"
+
+# restart the Jarvis helper so the next Jarvis window uses the refreshed speech engine
+$hp = Join-Path $Dir "hud.pid"
+if (Test-Path $hp) { Stop-Process -Id ([int](Get-Content $hp)) -Force -ErrorAction SilentlyContinue }
+Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine -like "*TerminalJarvis*ears.py*--serve*" } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
 Say ""; Say "  Recent logs:" "White"
 foreach ($f in "voice.log", "ears.log") {
@@ -54,4 +63,5 @@ foreach ($f in "voice.log", "ears.log") {
 }
 $stamp = Join-Path $Dir "last-greeting.txt"
 if (Test-Path $stamp) { Say ("  Last greeting: {0}  (it plays at most every 30 minutes)" -f (Get-Item $stamp).LastWriteTime) "DarkGray" }
-Say ""; Say "  Done. Send the lines above to whoever is helping you." "White"; Say ""
+Say ""; Say "  Done. Close every Jarvis window and open a new one to use any fixes." "White"
+Say "  Still stuck? Send the lines above to whoever is helping you." "White"; Say ""
