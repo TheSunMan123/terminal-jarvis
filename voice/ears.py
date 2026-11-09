@@ -137,9 +137,15 @@ class Ears:
         try:
             from faster_whisper import WhisperModel
 
+            import numpy as np
+
             os.makedirs(self.models_dir, exist_ok=True)
-            self.model = WhisperModel(self.model_name, device="cpu", compute_type="int8",
-                                      download_root=self.models_dir)
+            model = WhisperModel(self.model_name, device="cpu", compute_type="int8", download_root=self.models_dir,
+                                 cpu_threads=min(8, os.cpu_count() or 4))
+            # the first transcription pays a one-off setup cost: pay it now, not on the first press
+            list(model.transcribe(np.zeros(RATE, dtype="float32"), language="en", vad_filter=False,
+                                  without_timestamps=True)[0])
+            self.model = model
         except Exception as e:  # noqa: BLE001
             self.load_error = str(e) or e.__class__.__name__
         finally:
@@ -173,6 +179,8 @@ class Ears:
     def stop(self):
         import numpy as np
 
+        if self.stream is not None:
+            time.sleep(0.2)   # people let go a hair early: keep the end of the last word
         with self.lock:
             s, self.stream = self.stream, None
         if s is None:
@@ -203,8 +211,8 @@ class Ears:
         self.loaded.wait()
         if self.model is None:
             raise RuntimeError("speech model failed to load: %s" % self.load_error)
-        segs, _ = self.model.transcribe(audio, language="en", beam_size=5, vad_filter=True,
-                                        condition_on_previous_text=False)
+        segs, _ = self.model.transcribe(audio, language="en", beam_size=1, vad_filter=True,
+                                        condition_on_previous_text=False, without_timestamps=True)
         text = " ".join(s.text.strip() for s in segs).strip()
         diag("%.1fs via %s, peak %.3f -> %r" % (len(audio) / RATE, route, peak, text))
         # Whisper's habit on near-silence

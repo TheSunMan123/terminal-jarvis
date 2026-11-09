@@ -24,7 +24,7 @@ if ($all -eq "Deny" -or $desk -eq "Deny") {
 
 # refresh the speech engine + voice player to the latest fixes, then test the mic
 $ears = Join-Path $Dir "voice\ears.py"
-foreach ($f in "ears.py", "speak-worker.ps1") {
+foreach ($f in "ears.py", "speak-worker.ps1", "launch.ps1") {
   $dst = Join-Path $Dir "voice\$f"
   try {
     Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/TheSunMan123/terminal-jarvis/main/voice/$f" -OutFile "$dst.new"
@@ -65,6 +65,6 @@ foreach ($f in "voice.log", "ears.log") {
   if (Test-Path $p) { Say "  [$f]" "DarkGray"; Get-Content $p -Tail 6 | ForEach-Object { Say "    $_" "DarkGray" } }
 }
 $stamp = Join-Path $Dir "last-greeting.txt"
-if (Test-Path $stamp) { Say ("  Last greeting: {0}  (it plays at most every 30 minutes)" -f (Get-Item $stamp).LastWriteTime) "DarkGray" }
+if (Test-Path $stamp) { Say ("  Last greeting: {0}  (plays each time Jarvis opens; skipped if another window opened in the last minute)" -f (Get-Item $stamp).LastWriteTime) "DarkGray" }
 Say ""; Say "  Done. Close every Jarvis window and open a new one to use any fixes." "White"
 Say "  Still stuck? Send the lines above to whoever is helping you." "White"; Say ""

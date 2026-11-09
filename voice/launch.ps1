@@ -3,11 +3,12 @@
 $Dir = Join-Path $env:LOCALAPPDATA "TerminalJarvis"
 Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @("-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-File", "`"$(Join-Path $Dir 'voice\jarvis-hud.ps1')`"")
 
-# Welcome back: spoken + a short banner, on the first launch only (not again for 30 minutes)
+# Welcome back: spoken + a short banner, every time a Jarvis window opens (skipped only if another one
+# opened in the last minute, so several windows at once don't all talk)
 try {
   $state = Get-Content (Join-Path $Dir "state.json") -Raw | ConvertFrom-Json
   $stamp = Join-Path $Dir "last-greeting.txt"
-  $due = -not (Test-Path $stamp) -or (((Get-Date) - (Get-Item $stamp).LastWriteTime).TotalMinutes -ge 30)
+  $due = -not (Test-Path $stamp) -or (((Get-Date) - (Get-Item $stamp).LastWriteTime).TotalSeconds -ge 60)
   if ($due) {
     Set-Content -Path $stamp -Value (Get-Date).ToString("s")
     $hr = (Get-Date).Hour

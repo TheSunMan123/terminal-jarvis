@@ -44,9 +44,9 @@ if [ "$TJ_PTT_KEY" != "none" ] && [ -n "$TJ_PTT_KEY" ] && [ -x "$TJ_UV" ]; then
   fi
 fi
 
-# --- welcome back: banner + spoken greeting, at most every 30 minutes ---------------------
+# --- welcome back: banner + spoken greeting each launch (skipped if another opened in the last minute) ---
 stamp="$TJ/last-greeting"
-if [ ! -f "$stamp" ] || [ -n "$(find "$stamp" -mmin +30 2>/dev/null)" ]; then
+if [ ! -f "$stamp" ] || [ $(( $(date +%s) - $(stat -f %m "$stamp" 2>/dev/null || echo 0) )) -ge 60 ]; then
   touch "$stamp"
   hr=$(date +%H); hr=${hr#0}
   if [ "$hr" -ge 5 ] && [ "$hr" -lt 12 ]; then part=morning; elif [ "$hr" -ge 12 ] && [ "$hr" -lt 17 ]; then part=afternoon; else part=evening; fi
