@@ -24,7 +24,7 @@ if ($all -eq "Deny" -or $desk -eq "Deny") {
 
 # refresh the speech engine + voice player to the latest fixes, then test the mic
 $ears = Join-Path $Dir "voice\ears.py"
-foreach ($f in "ears.py", "speak-worker.ps1", "launch.ps1") {
+foreach ($f in "ears.py", "speak-worker.ps1", "launch.ps1", "jarvis-hud.ps1") {
   $dst = Join-Path $Dir "voice\$f"
   try {
     Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/TheSunMan123/terminal-jarvis/main/voice/$f" -OutFile "$dst.new"

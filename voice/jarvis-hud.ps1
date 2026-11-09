@@ -326,13 +326,25 @@ public static class TJPtt {
           try { text = Encoding.UTF8.GetString(Convert.FromBase64String(line.Length > 5 ? line.Substring(5).Trim() : "")); } catch { }
           State = "";
           text = text.Replace("\r", " ").Replace("\n", " ").Trim();
-          if (text.Length > 0 && TJHud.IsJarvis(GetForegroundWindow())) { TypeText(text); if (AutoSend) { Thread.Sleep(60); Tap(0x0D); } }
+          if (text.Length > 0 && TJHud.IsJarvis(GetForegroundWindow())) {
+            TypeText(text);
+            // Codex treats a fast burst of characters as a paste and turns an Enter that follows too soon
+            // into a new line. Wait until the burst has settled, then press Enter to send.
+            // (tested: 60 ms -> becomes a new line, 450 ms -> sends; longer text takes the terminal longer to pass on)
+            if (AutoSend) { Thread.Sleep(Math.Min(1500, SendDelayMs + 3 * text.Length)); if (TJHud.IsJarvis(GetForegroundWindow())) PressEnter(); }
+          }
         } else if (line.StartsWith("ERROR")) {
           Log("ears: " + line); State = "MIC ERROR"; ThreadPool.QueueUserWorkItem(x => { Thread.Sleep(2500); if (State == "MIC ERROR") State = ""; });
         } else if (line == "READY" && State == "WARMING UP") State = "";
       }
     } catch { }
     if (State != "") State = "";
+  }
+  public static int SendDelayMs = 450;
+  static void PressEnter() {
+    var d = new INPUT { type = 1 }; d.u.ki = new KEYBDINPUT { vk = 0x0D, scan = 0x1C, flags = 0 };
+    var u = new INPUT { type = 1 }; u.u.ki = new KEYBDINPUT { vk = 0x0D, scan = 0x1C, flags = 0x0002 };
+    SendInput(2, new[] { d, u }, Marshal.SizeOf(typeof(INPUT)));
   }
   static void TypeText(string s) {
     var list = new List<INPUT>();
