@@ -205,7 +205,13 @@ foreach ($pf in $profFiles) {
 }
 # Profiles only load when scripts are allowed. Windows' out-of-the-box "Restricted" policy blocks them, so switch
 # just this user to RemoteSigned (the usual setting: your own local scripts run, downloaded ones must be signed).
-$pol = Get-ExecutionPolicy
+# Ignore the Process scope: this installer itself runs with -ExecutionPolicy Bypass, which would hide the
+# policy a new terminal actually gets. Effective = first defined of MachinePolicy, UserPolicy, CurrentUser, LocalMachine.
+$pol = "Undefined"
+foreach ($sc in "MachinePolicy", "UserPolicy", "CurrentUser", "LocalMachine") {
+  $v = [string](Get-ExecutionPolicy -Scope $sc)
+  if ($v -ne "Undefined") { $pol = $v; break }
+}
 if ($pol -eq "Restricted" -or $pol -eq "Undefined") {
   try {
     Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force -ErrorAction Stop
