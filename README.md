@@ -19,6 +19,11 @@ irm https://raw.githubusercontent.com/TheSunMan123/terminal-jarvis/main/get.ps1 
 ```
 It downloads the kit and runs the installer (steps 3-8 below). Paste the same line again any time to **update**.
 
+> **Run it in a plain PowerShell window, not inside Codex.** Don't ask Codex to install or update this kit. Codex runs commands in a sandbox with no internet and no write access to its own settings folder, so it fails with errors like *"cloned into the permitted temporary folder but can't connect to GitHub"*. Close Codex, open **Windows PowerShell** from the Start menu (admin not needed), and paste the line there.
+>
+> - *"Running scripts is disabled on this system"*: run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, answer **Y**, then paste the line again.
+> - *Connection / SSL errors in PowerShell itself*: your network or antivirus is blocking GitHub. Download the ZIP instead (green **Code** button → **Download ZIP**) and follow "Install (from a download)" below.
+
 ## Install (from a download)
 1. Unzip this folder anywhere.
 2. **Double-click `Install Jarvis.cmd`.** (Or in a terminal: `powershell -ExecutionPolicy Bypass -File .\install.ps1`.)
