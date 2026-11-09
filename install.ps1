@@ -165,6 +165,72 @@ $parts = @($userPath -split ';' | Where-Object { $_ -and ($_.TrimEnd('\') -ne $S
 [Environment]::SetEnvironmentVariable("Path", (@($ShimDir) + $parts) -join ';', "User")
 Say "  + Type 'codex' in any terminal and $Assistant opens (scripts like 'codex exec' stay plain Codex)" "Green"
 
+# PATH order alone isn't enough: Windows searches the SYSTEM path before the user path, so a Codex installed
+# system-wide (or a terminal started before the PATH change) skips the shim. A 'codex' function in the
+# PowerShell profiles always wins over anything on PATH, so add one to Windows PowerShell and PowerShell 7.
+$ProfBlock = @'
+# >>> terminal-jarvis >>>  (typing codex opens Jarvis; removed by Terminal Jarvis uninstall.ps1)
+function codex {
+  $shim = Join-Path $env:LOCALAPPDATA 'TerminalJarvis\bin\codex.cmd'
+  if (-not (Test-Path $shim)) {
+    $real = Get-Command codex -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($real) { & $real.Source @args }; return
+  }
+  if ($MyInvocation.ExpectingInput) { $input | & $shim @args } else { & $shim @args }
+}
+# <<< terminal-jarvis <<<
+'@
+function Get-FileEnc($path) {
+  $b = [IO.File]::ReadAllBytes($path)
+  if ($b.Length -ge 2 -and $b[0] -eq 0xFF -and $b[1] -eq 0xFE) { return [Text.Encoding]::Unicode }
+  if ($b.Length -ge 2 -and $b[0] -eq 0xFE -and $b[1] -eq 0xFF) { return [Text.Encoding]::BigEndianUnicode }
+  if ($b.Length -ge 3 -and $b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF) { return (New-Object Text.UTF8Encoding($true)) }
+  try { [void](New-Object Text.UTF8Encoding($false, $true)).GetString($b); return $Utf8 } catch { return [Text.Encoding]::Default }
+}
+$docs = [Environment]::GetFolderPath("MyDocuments")
+$profFiles = @((Join-Path $docs "WindowsPowerShell\profile.ps1"), (Join-Path $docs "PowerShell\profile.ps1"))
+foreach ($pf in $profFiles) {
+  try {
+    New-Item -ItemType Directory -Force (Split-Path -Parent $pf) | Out-Null
+    if (Test-Path $pf) {
+      $enc = Get-FileEnc $pf
+      $t = [IO.File]::ReadAllText($pf, $enc)
+      $t = [regex]::Replace($t, '(?s)\r?\n?# >>> terminal-jarvis >>>.*?# <<< terminal-jarvis <<<\r?\n?', "`r`n").TrimEnd()
+      if ($t) { $t += "`r`n`r`n" }
+      [IO.File]::WriteAllText($pf, $t + $ProfBlock + "`r`n", $enc)
+    } else {
+      [IO.File]::WriteAllText($pf, $ProfBlock + "`r`n", $Utf8)
+    }
+  } catch { Say "  (could not add the codex shortcut to $pf : $($_.Exception.Message))" "Yellow" }
+}
+# Profiles only load when scripts are allowed. Windows' out-of-the-box "Restricted" policy blocks them, so switch
+# just this user to RemoteSigned (the usual setting: your own local scripts run, downloaded ones must be signed).
+$pol = Get-ExecutionPolicy
+if ($pol -eq "Restricted" -or $pol -eq "Undefined") {
+  try {
+    Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force -ErrorAction Stop
+    Say "  + PowerShell script policy for your user: $pol -> RemoteSigned (so your PowerShell profile loads)" "Green"
+  } catch { Say "  ! PowerShell profiles are blocked by policy ($pol). Typing codex in PowerShell may open plain Codex; use the desktop shortcut." "Yellow" }
+} elseif ($pol -eq "AllSigned") {
+  Say "  ! PowerShell policy is AllSigned, so the codex shortcut in your profile won't load. Use the desktop shortcut." "Yellow"
+}
+Say "  + PowerShell: 'codex' goes through $Assistant even if another Codex comes first on your PATH" "Green"
+
+# Report what a fresh Command Prompt would run (cmd has no profile, so only PATH order counts there).
+$exts = @($env:PATHEXT -split ';' | Where-Object { $_ })
+$firstHit = $null
+foreach ($d in @(([Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")) -split ';' | Where-Object { $_ })) {
+  foreach ($x in $exts) {
+    $p = Join-Path ([Environment]::ExpandEnvironmentVariables($d)) ("codex" + $x)
+    if (Test-Path -LiteralPath $p -PathType Leaf) { $firstHit = $p; break }
+  }
+  if ($firstHit) { break }
+}
+if ($firstHit -and ((Split-Path -Parent $firstHit).TrimEnd('\') -ne $ShimDir.TrimEnd('\'))) {
+  Say "  ! Note: Command Prompt (cmd) will still run plain Codex ($firstHit comes first on the system PATH)." "DarkGray"
+  Say "    PowerShell and the desktop shortcut open $Assistant; that's where to use it." "DarkGray"
+}
+
 # --- 6. voice: speaks the opening of each Codex reply (Codex "Stop" hook in ~/.codex/hooks.json) ---------
 $JarvisVoiceId = "05b36da8574341d0803391491850db20"   # public "Jarvis" voice on fish.audio
 . (Join-Path $Kit "voice\creds.ps1")

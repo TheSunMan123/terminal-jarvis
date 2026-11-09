@@ -50,6 +50,7 @@ From then on, Jarvis reads the first paragraph of every reply aloud. Mute: set `
 | HUD helper (readout + push-to-talk) | `%LOCALAPPDATA%\TerminalJarvis\voice\jarvis-hud.ps1` | Started by the Jarvis profile, quits when its window closes. Listens only for the talk key, only in the Jarvis window. |
 | Fish key | Windows Credential Manager → `terminal-jarvis-fish` | Only if you chose Fish. Never written to a file. |
 | `codex` launcher | `%LOCALAPPDATA%\TerminalJarvis\bin\codex.cmd`, added to the front of your **user** PATH | Routes interactive `codex` into the Jarvis tab; everything else passes through. |
+| `codex` in PowerShell | `Documents\WindowsPowerShell\profile.ps1` and `Documents\PowerShell\profile.ps1` | A small `codex` function between `terminal-jarvis` markers, so PowerShell opens Jarvis even when another Codex sits earlier on the **system** PATH. The rest of your profile is kept. If your script policy was Windows' default *Restricted*, it is set to **RemoteSigned** for your user only (so profiles can load); uninstall leaves that setting alone. Command Prompt (cmd) has no profile, so there `codex` follows PATH order: use PowerShell or the desktop shortcut. |
 | Backdrop, icon, voice scripts | `%LOCALAPPDATA%\TerminalJarvis` | |
 
 **Uninstall:** `powershell -ExecutionPolicy Bypass -File .\uninstall.ps1` — removes all of the above and puts back any status bar you had before.

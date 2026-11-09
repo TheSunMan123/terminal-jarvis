@@ -45,6 +45,21 @@ if ($userPath) {
   [Environment]::SetEnvironmentVariable("Path", ($kept -join ';'), "User")
 }
 
+$docs = [Environment]::GetFolderPath("MyDocuments")
+foreach ($pf in @((Join-Path $docs "WindowsPowerShell\profile.ps1"), (Join-Path $docs "PowerShell\profile.ps1"))) {
+  if (-not (Test-Path $pf)) { continue }
+  try {
+    $b = [IO.File]::ReadAllBytes($pf)
+    $enc = if ($b.Length -ge 2 -and $b[0] -eq 0xFF -and $b[1] -eq 0xFE) { [Text.Encoding]::Unicode }
+      elseif ($b.Length -ge 3 -and $b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF) { New-Object Text.UTF8Encoding($true) }
+      else { try { [void](New-Object Text.UTF8Encoding($false, $true)).GetString($b); $Utf8 } catch { [Text.Encoding]::Default } }
+    $t = [IO.File]::ReadAllText($pf, $enc)
+    if ($t -notmatch '# >>> terminal-jarvis >>>') { continue }
+    $t = [regex]::Replace($t, '(?s)\r?\n?# >>> terminal-jarvis >>>.*?# <<< terminal-jarvis <<<\r?\n?', "`r`n").Trim()
+    if ($t) { [IO.File]::WriteAllText($pf, $t + "`r`n", $enc) } else { Remove-Item $pf -Force }
+  } catch { Write-Host "  (could not edit $pf - remove the terminal-jarvis block by hand)" -ForegroundColor Yellow }
+}
+
 if ($state.fish_key_slot -eq "terminal-jarvis-fish") { cmdkey /delete:terminal-jarvis-fish | Out-Null }
 if (Test-Path $FragDir) { Remove-Item $FragDir -Recurse -Force }
 if ($state.shortcut -and (Test-Path $state.shortcut)) { Remove-Item $state.shortcut -Force }
