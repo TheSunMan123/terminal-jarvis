@@ -6,7 +6,9 @@
 #   (optional, no prompts:  -User "Alex" -Assistant "Jarvis" -Address "sir" -Voice windows|fish|none
 #    -FishVoiceId <id> [-FishModel s1] [-FishKeySlot <existing Credential Manager entry>])
 #    -PttKey rightalt|capslock|f8|f9|scrolllock|none
-param([string]$User, [string]$Assistant, [string]$Address, [string]$Voice, [string]$FishVoiceId, [string]$FishModel, [string]$FishKeySlot, [string]$PttKey)
+#    -PttEngine whisper|windows  -SttModel tiny.en|base.en|small.en
+param([string]$User, [string]$Assistant, [string]$Address, [string]$Voice, [string]$FishVoiceId, [string]$FishModel, [string]$FishKeySlot, [string]$PttKey,
+  [string]$PttEngine, [string]$SttModel)
 $ErrorActionPreference = "Stop"
 $Kit = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Home_ = $env:USERPROFILE
@@ -300,12 +302,52 @@ if (-not $PttKey) {
 }
 $state.ptt_key = $PttKey.ToLower()
 $state.ptt_auto_send = $true
+# Speech-to-text: a local Whisper model (faster-whisper) run by uv, which brings its own Python. Audio never
+# leaves the PC. If anything here fails, fall back to Windows voice typing (Win+H).
+if (-not $PttEngine) { $PttEngine = "whisper" }
+$PttEngine = $PttEngine.ToLower(); if ($PttEngine -notin @("whisper", "windows")) { $PttEngine = "whisper" }
+if (-not $SttModel) { $SttModel = "base.en" }
+if ($state.ptt_key -ne "none" -and $PttEngine -eq "whisper") {
+  $uvExe = $null
+  foreach ($c in @((Get-Command uv.exe -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source),
+                   (Join-Path $Home_ ".local\bin\uv.exe"), (Join-Path $InstallDir "uv\uv.exe"))) {
+    if ($c -and (Test-Path $c)) { $uvExe = $c; break }
+  }
+  if (-not $uvExe) {
+    Say "  Setting up the speech engine (uv, a small Python runner from astral.sh)..." "DarkGray"
+    try {
+      $env:UV_UNMANAGED_INSTALL = (Join-Path $InstallDir "uv")   # private copy: no PATH changes, removed by uninstall
+      $uvScript = Invoke-RestMethod -UseBasicParsing "https://astral.sh/uv/install.ps1"
+      & ([scriptblock]::Create($uvScript)) | Out-Null
+      Remove-Item Env:UV_UNMANAGED_INSTALL -ErrorAction SilentlyContinue
+      if (Test-Path (Join-Path $InstallDir "uv\uv.exe")) { $uvExe = Join-Path $InstallDir "uv\uv.exe" }
+    } catch { Say "  ! Could not download uv: $($_.Exception.Message)" "Yellow" }
+  }
+  $ok = $false
+  if ($uvExe) {
+    Say "  Downloading the speech engine + model ($SttModel, ~250 MB, first time only; a minute or two)..." "DarkGray"
+    $env:UV_SYSTEM_CERTS = "1"
+    $eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"   # uv reports progress on stderr; PS 5.1 would treat it as fatal
+    $warm = & $uvExe run --script (Join-Path $InstallDir "voice\ears.py") --warmup --model $SttModel --state (Join-Path $InstallDir "state.json") 2>&1 |
+      ForEach-Object { "$_" }
+    $ErrorActionPreference = $eap
+    $ok =($warm -join "`n") -match '(?m)^READY'
+    if (-not $ok) { Say "  ! Speech engine setup failed:" "Yellow"; $warm | Select-Object -Last 4 | ForEach-Object { Say "    $_" "DarkGray" } }
+  }
+  if ($ok) { $state.uv_exe = $uvExe; $state.stt_model = $SttModel }
+  else { $PttEngine = "windows"; Say "  ! Using Windows voice typing for push-to-talk instead (re-run the installer to retry)." "Yellow" }
+}
+$state.ptt_engine = $PttEngine
 # the HUD helper (status readout + push-to-talk) is started by the Jarvis profile itself and quits when its
 # windows close; nothing is added to Windows startup. Restart a running one so it picks up new settings.
 $old = Join-Path $InstallDir "hud.pid"
 if (Test-Path $old) { Stop-Process -Id ([int](Get-Content $old)) -Force -ErrorAction SilentlyContinue }
 if ($state.ptt_key -ne "none") {
-  Say "  + Push-to-talk: hold $($state.ptt_key.ToUpper()) in the $Assistant window (uses Windows voice typing; first time, Windows may ask to turn it on)" "Green"
+  if ($PttEngine -eq "whisper") {
+    Say "  + Push-to-talk: hold $($state.ptt_key.ToUpper()) in the $Assistant window and speak; let go and it's typed + sent (speech recognised on this PC)" "Green"
+  } else {
+    Say "  + Push-to-talk: hold $($state.ptt_key.ToUpper()) in the $Assistant window (uses Windows voice typing; first time, Windows may ask to turn it on)" "Green"
+  }
 }
 Say "  + Status readout: $Assistant, model and your usage-limit bars, pinned beside the tabs" "Green"
 

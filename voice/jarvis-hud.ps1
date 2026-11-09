@@ -88,7 +88,9 @@ public class TJHud : Form {
     try { return Process.GetProcessById((int)pid).ProcessName.Equals("WindowsTerminal", StringComparison.OrdinalIgnoreCase); } catch { return false; }
   }
 
+  string shownPtt = "";
   void Follow() {
+    if (TJPtt.State != shownPtt) { shownPtt = TJPtt.State; Refresh2(); }
     bool fgJ; IntPtr h = FindJarvis(out fgJ);
     if (h != IntPtr.Zero) lastSeen = DateTime.Now;
     else if ((DateTime.Now - lastSeen).TotalSeconds > 20) { Application.Exit(); return; }
@@ -209,6 +211,11 @@ public class TJHud : Form {
         AddWindow(n, Regex.Match(block, "\"primary\":(\\{[^}]*\\}|null)").Groups[1].Value);
         AddWindow(n, Regex.Match(block, "\"secondary\":(\\{[^}]*\\}|null)").Groups[1].Value);
       }
+      if (shownPtt != "") {   // push-to-talk in progress: the readout becomes a live mic indicator
+        n = new List<KeyValuePair<string, Color>>();
+        n.Add(new KeyValuePair<string, Color>(Spaced(Title), CY)); n.Add(Dot());
+        n.Add(new KeyValuePair<string, Color>((char)0x25CF + " " + shownPtt, shownPtt == "LISTENING" || shownPtt == "MIC ERROR" ? RED : GOLD));
+      }
       bool changed = n.Count != segs.Count; if (!changed) for (int i = 0; i < n.Count; i++) if (n[i].Key != segs[i].Key || n[i].Value != segs[i].Value) { changed = true; break; }
       if (changed) { segs = n; Measure(); }
     } catch { }
@@ -258,19 +265,101 @@ public class TJHud : Form {
   }
 }
 
-// push-to-talk: low-level keyboard hook on the HUD's UI thread; only the talk key, only in the Jarvis window
+// push-to-talk: low-level keyboard hook on the HUD's UI thread; only the talk key, only in the Jarvis window.
+// Engine "whisper" (default): ears.py records while the key is held and transcribes on this PC (faster-whisper),
+// then the words are typed into Codex and sent. Engine "windows": the old Windows voice typing (Win+H).
 public static class TJPtt {
   delegate IntPtr LLProc(int nCode, IntPtr wParam, IntPtr lParam);
   [StructLayout(LayoutKind.Sequential)] struct KBD { public uint vk, scan, flags, time; public IntPtr extra; }
+  [StructLayout(LayoutKind.Sequential)] struct MOUSEINPUT { public int dx, dy; public uint data, flags, time; public IntPtr extra; }
+  [StructLayout(LayoutKind.Sequential)] struct KEYBDINPUT { public ushort vk, scan; public uint flags, time; public IntPtr extra; }
+  [StructLayout(LayoutKind.Explicit)] struct UNION { [FieldOffset(0)] public MOUSEINPUT mi; [FieldOffset(0)] public KEYBDINPUT ki; }
+  [StructLayout(LayoutKind.Sequential)] struct INPUT { public uint type; public UNION u; }
   [DllImport("user32.dll")] static extern IntPtr SetWindowsHookEx(int id, LLProc fn, IntPtr mod, uint tid);
   [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr h, int n, IntPtr w, IntPtr l);
   [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr GetModuleHandle(string n);
   [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+  [DllImport("user32.dll", SetLastError = true)] static extern uint SendInput(uint n, INPUT[] inputs, int size);
   static LLProc proc = Hook; static IntPtr hook; static uint Vk; static volatile bool held, active;
-  public static void Install(uint vk) { Vk = vk; if (vk != 0) hook = SetWindowsHookEx(13, proc, GetModuleHandle(null), 0); }
+  static string Engine = "windows", Uv, Script, StatePath, LogPath; static bool AutoSend = true;
+  static Process ears; static readonly object earsLock = new object();
+  public static volatile string State = "";      // "" | LISTENING | TRANSCRIBING | WARMING UP | MIC ERROR (shown on the chip)
+
+  public static void Install(uint vk, string engine, string uv, string script, string statePath, bool autoSend) {
+    Vk = vk; Engine = (engine ?? "windows").ToLower(); Uv = uv; Script = script; StatePath = statePath; AutoSend = autoSend;
+    LogPath = Path.Combine(Path.GetDirectoryName(statePath), "ears.log");
+    if (vk == 0) return;
+    hook = SetWindowsHookEx(13, proc, GetModuleHandle(null), 0);
+    if (Engine == "whisper") { EnsureEars(); Application.ApplicationExit += (s, e) => StopEars(); }
+  }
+  static void Log(string m) { try { File.AppendAllText(LogPath, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss ") + m + Environment.NewLine); } catch { } }
+
+  // ---- the speech engine: one warm process for the life of the HUD ----
+  static void EnsureEars() {
+    lock (earsLock) {
+      if (ears != null && !ears.HasExited) return;
+      if (string.IsNullOrEmpty(Uv) || !File.Exists(Uv) || !File.Exists(Script)) { Log("ears: uv or ears.py missing"); return; }
+      try {
+        var psi = new ProcessStartInfo(Uv, "run --script \"" + Script + "\" --serve --state \"" + StatePath + "\"");
+        psi.UseShellExecute = false; psi.CreateNoWindow = true;
+        psi.RedirectStandardInput = true; psi.RedirectStandardOutput = true; psi.RedirectStandardError = true;
+        psi.StandardOutputEncoding = Encoding.UTF8;
+        psi.EnvironmentVariables["UV_SYSTEM_CERTS"] = "1";
+        ears = Process.Start(psi);
+        var p = ears;
+        new Thread(() => ReadOut(p)) { IsBackground = true }.Start();
+        new Thread(() => { try { string e; while ((e = p.StandardError.ReadLine()) != null) { if (e.Trim().Length > 0 && !e.Contains("UV_")) Log("ears: " + e); } } catch { } }) { IsBackground = true }.Start();
+      } catch (Exception ex) { Log("ears start failed: " + ex.Message); ears = null; }
+    }
+  }
+  static void StopEars() { lock (earsLock) { try { if (ears != null && !ears.HasExited) { ears.StandardInput.Close(); if (!ears.WaitForExit(1500)) ears.Kill(); } } catch { } ears = null; } }
+  static void Send(string cmd) {
+    lock (earsLock) { try { if (ears != null && !ears.HasExited) { ears.StandardInput.WriteLine(cmd); ears.StandardInput.Flush(); } } catch (Exception ex) { Log("ears send failed: " + ex.Message); } }
+  }
+  static void ReadOut(Process p) {
+    try {
+      string line;
+      while ((line = p.StandardOutput.ReadLine()) != null) {
+        if (line.StartsWith("TEXT")) {
+          string text = "";
+          try { text = Encoding.UTF8.GetString(Convert.FromBase64String(line.Length > 5 ? line.Substring(5).Trim() : "")); } catch { }
+          State = "";
+          text = text.Replace("\r", " ").Replace("\n", " ").Trim();
+          if (text.Length > 0 && TJHud.IsJarvis(GetForegroundWindow())) { TypeText(text); if (AutoSend) { Thread.Sleep(60); Tap(0x0D); } }
+        } else if (line.StartsWith("ERROR")) {
+          Log("ears: " + line); State = "MIC ERROR"; ThreadPool.QueueUserWorkItem(x => { Thread.Sleep(2500); if (State == "MIC ERROR") State = ""; });
+        } else if (line == "READY" && State == "WARMING UP") State = "";
+      }
+    } catch { }
+    if (State != "") State = "";
+  }
+  static void TypeText(string s) {
+    var list = new List<INPUT>();
+    foreach (char c in s) {
+      var d = new INPUT { type = 1 }; d.u.ki = new KEYBDINPUT { vk = 0, scan = c, flags = 0x0004 };            // KEYEVENTF_UNICODE
+      var u = new INPUT { type = 1 }; u.u.ki = new KEYBDINPUT { vk = 0, scan = c, flags = 0x0004 | 0x0002 };   // + KEYUP
+      list.Add(d); list.Add(u);
+    }
+    if (list.Count > 0) SendInput((uint)list.Count, list.ToArray(), Marshal.SizeOf(typeof(INPUT)));
+  }
+
   static void Tap(byte vk) { keybd_event(vk, 0, 0, UIntPtr.Zero); keybd_event(vk, 0, 2, UIntPtr.Zero); }
   static void WinH() { keybd_event(0x5B, 0, 0, UIntPtr.Zero); Tap(0x48); keybd_event(0x5B, 0, 2, UIntPtr.Zero); }
+  static void Pressed() {
+    if (Engine != "whisper") { ThreadPool.QueueUserWorkItem(x => WinH()); return; }
+    ThreadPool.QueueUserWorkItem(x => { EnsureEars(); Send("start"); });
+    State = "LISTENING";
+  }
+  static void Released() {
+    if (Engine != "whisper") {
+      ThreadPool.QueueUserWorkItem(x => { Thread.Sleep(450); WinH(); Thread.Sleep(1100); if (TJHud.IsJarvis(GetForegroundWindow())) Tap(0x0D); });
+      return;
+    }
+    State = "TRANSCRIBING";
+    ThreadPool.QueueUserWorkItem(x => Send("stop"));
+    ThreadPool.QueueUserWorkItem(x => { Thread.Sleep(20000); if (State == "TRANSCRIBING") State = ""; });   // never stick
+  }
   static IntPtr Hook(int n, IntPtr w, IntPtr l) {
     if (n >= 0) {
       var k = (KBD)Marshal.PtrToStructure(l, typeof(KBD));
@@ -279,14 +368,10 @@ public static class TJPtt {
         if (isDown) {
           if (held) return active ? (IntPtr)1 : CallNextHookEx(hook, n, w, l);
           held = true;
-          if (TJHud.IsJarvis(GetForegroundWindow())) { active = true; ThreadPool.QueueUserWorkItem(x => WinH()); return (IntPtr)1; }
+          if (TJHud.IsJarvis(GetForegroundWindow())) { active = true; Pressed(); return (IntPtr)1; }
         } else if (isUp) {
           held = false;
-          if (active) {
-            active = false;
-            ThreadPool.QueueUserWorkItem(x => { Thread.Sleep(450); WinH(); Thread.Sleep(1100); if (TJHud.IsJarvis(GetForegroundWindow())) Tap(0x0D); });
-            return (IntPtr)1;
-          }
+          if (active) { active = false; Released(); return (IntPtr)1; }
         }
       }
     }
@@ -294,5 +379,7 @@ public static class TJPtt {
   }
 }
 "@
-[TJPtt]::Install([uint32]$vk)
+$engine = if ($state.ptt_engine) { [string]$state.ptt_engine } else { "windows" }
+$uv = [string]$state.uv_exe
+[TJPtt]::Install([uint32]$vk, $engine, $uv, (Join-Path $Dir "voice\ears.py"), (Join-Path $Dir "state.json"), ($state.ptt_auto_send -ne $false))
 [TJHud]::Start([string]$state.assistant)

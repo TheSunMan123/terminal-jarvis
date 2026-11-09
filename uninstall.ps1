@@ -37,6 +37,10 @@ if (Test-Path $hooksFile) {
 }
 $pttPid = Join-Path $InstallDir "hud.pid"
 if (Test-Path $pttPid) { Stop-Process -Id ([int](Get-Content $pttPid)) -Force -ErrorAction SilentlyContinue }
+# the speech engine (holds the model files open)
+Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine -like "*TerminalJarvis*ears.py*" } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+Start-Sleep -Milliseconds 500
 
 $shimDir = (Join-Path $InstallDir "bin").TrimEnd('\')
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
