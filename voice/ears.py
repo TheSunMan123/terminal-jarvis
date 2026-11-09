@@ -103,21 +103,72 @@ class Ears:
         except Exception:
             pass
         if not self.chunks:
+            diag("no audio arrived from the microphone")
             return ""
         audio = np.concatenate(self.chunks)
         self.chunks = []
+        peak = float(np.abs(audio).max()) if len(audio) else 0.0
         if len(audio) < RATE * 0.35:  # a tap, not speech
+            diag("too short (%.2fs)" % (len(audio) / RATE))
             return ""
+        if peak < 0.003:
+            diag("%.1fs recorded but it is silent (peak %.4f): microphone muted, blocked by Windows privacy, "
+                 "or the wrong input device" % (len(audio) / RATE, peak))
         self.loaded.wait()
         if self.model is None:
             raise RuntimeError("speech model failed to load: %s" % self.load_error)
         segs, _ = self.model.transcribe(audio, language="en", beam_size=5, vad_filter=True,
                                         condition_on_previous_text=False)
         text = " ".join(s.text.strip() for s in segs).strip()
+        diag("%.1fs, peak %.3f -> %r" % (len(audio) / RATE, peak, text))
         # Whisper's habit on near-silence
         if text.lower().strip(" .!") in ("", "you", "thank you", "thanks for watching"):
             return ""
         return text
+
+
+def diag(m):
+    """One line per push-to-talk on stderr (the Windows HUD copies it into ears.log)."""
+    try:
+        sys.stderr.write("ptt: " + m + "\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
+def selftest(ears):
+    import numpy as np
+    import sounddevice as sd
+
+    print("  Microphone test", flush=True)
+    try:
+        dev = sd.query_devices(kind="input")
+        print("  Input device : %s" % dev["name"], flush=True)
+    except Exception as e:  # noqa: BLE001
+        print("  ! No input device: %s" % e, flush=True)
+        return
+    threading.Thread(target=ears.load, daemon=True).start()
+    print("  Speak now for 4 seconds...", flush=True)
+    try:
+        rec = sd.rec(int(4 * RATE), samplerate=RATE, channels=1, dtype="float32")
+        sd.wait()
+    except Exception as e:  # noqa: BLE001
+        print("  ! Could not record: %s" % e, flush=True)
+        return
+    a = rec[:, 0]
+    peak = float(np.abs(a).max())
+    bar = "#" * min(40, int(peak * 80))
+    print("  Loudness     : %.3f  [%-40s]" % (peak, bar), flush=True)
+    if peak < 0.003:
+        print("  ! Silent. Check: Settings > Privacy & security > Microphone > 'Let desktop apps access", flush=True)
+        print("    your microphone' is ON; the mic isn't muted; and Settings > System > Sound > Input", flush=True)
+        print("    has the right microphone selected.", flush=True)
+    ears.loaded.wait()
+    if ears.model is None:
+        print("  ! Speech model failed to load: %s" % ears.load_error, flush=True)
+        return
+    segs, _ = ears.model.transcribe(a, language="en", beam_size=5, vad_filter=True, condition_on_previous_text=False)
+    print("  Heard        : %r" % " ".join(s.text.strip() for s in segs).strip(), flush=True)
 
 
 # ---------------------------------------------------------------- Windows: driven by the HUD over stdin
@@ -306,6 +357,7 @@ def main():
     g.add_argument("--warmup", action="store_true")
     g.add_argument("--serve", action="store_true")
     g.add_argument("--mac", action="store_true")
+    g.add_argument("--test", action="store_true", help="record 4 s from the default mic and show what was heard")
     a = ap.parse_args()
     home = os.path.dirname(os.path.abspath(a.state))
     state = load_state(a.state)
@@ -320,6 +372,8 @@ def main():
 
         list(ears.model.transcribe(np.zeros(RATE, dtype="float32"), language="en")[0])
         print("READY", flush=True)
+    elif a.test:
+        selftest(ears)
     elif a.serve:
         serve(ears)
     else:
