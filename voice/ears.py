@@ -108,8 +108,9 @@ def to_16k(chunks, rate):
 
 
 class Ears:
-    def __init__(self, model_name, models_dir, mic_api=None):
+    def __init__(self, model_name, models_dir, mic_api=None, hotwords=None):
         self.model_name = model_name or "base.en"
+        self.hotwords = hotwords or None
         self.models_dir = models_dir
         self.model = None
         self.loaded = threading.Event()
@@ -213,7 +214,10 @@ class Ears:
             raise RuntimeError("speech model failed to load: %s" % self.load_error)
         t0 = time.time()
         segs, _ = self.model.transcribe(audio, language="en", beam_size=1, vad_filter=True,
-                                        condition_on_previous_text=False, without_timestamps=True)
+                                        condition_on_previous_text=False, without_timestamps=True,
+                                        # "Talking to Jarvis." so the name isn't heard as "Jones". (Tested: the
+                                        # hotwords option instead dropped a leading "Jarvis," from sentences.)
+                                        initial_prompt=("Talking to %s." % self.hotwords) if self.hotwords else None)
         text = " ".join(s.text.strip() for s in segs).strip()
         diag("%.1fs via %s, peak %.3f, recognised in %.1fs -> %r" % (len(audio) / RATE, route, peak, time.time() - t0, text))
         # Whisper's habit on near-silence
@@ -487,7 +491,8 @@ def main():
     a = ap.parse_args()
     home = os.path.dirname(os.path.abspath(a.state))
     state = load_state(a.state)
-    ears = Ears(a.model or state.get("stt_model", "base.en"), os.path.join(home, "models"), state.get("mic_api"))
+    ears = Ears(a.model or state.get("stt_model", "base.en"), os.path.join(home, "models"), state.get("mic_api"),
+                state.get("assistant") or "Jarvis")
     if a.warmup:
         print("  Downloading the speech model (%s) - first time only..." % ears.model_name, flush=True)
         ears.load()
