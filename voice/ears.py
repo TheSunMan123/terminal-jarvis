@@ -8,6 +8,7 @@
 #   "pynput>=1.7.6; sys_platform == 'darwin'",
 #   "pyobjc-framework-Cocoa; sys_platform == 'darwin'",
 #   "pyobjc-framework-ApplicationServices; sys_platform == 'darwin'",
+#   "pyobjc-framework-AVFoundation; sys_platform == 'darwin'",
 # ]
 # ///
 """Terminal Jarvis ears: push-to-talk speech-to-text that runs on your own computer (faster-whisper).
@@ -21,6 +22,8 @@ Modes
                out: "READY" | "LISTENING" | "TEXT <base64 utf-8>" | "ERROR <message>"
   --mac      macOS: listens for the talk key itself (only while a terminal app is in front),
              then types the words into the terminal and presses Return.
+  --permissions   macOS: ask for / check the three permissions push-to-talk needs (Microphone,
+             Accessibility, Input Monitoring). Run it from the terminal app you use for Jarvis.
 """
 import argparse
 import base64
@@ -343,7 +346,105 @@ def serve(ears):
 TERMINALS = {
     "com.apple.Terminal", "com.googlecode.iterm2", "dev.warp.Warp-Stable", "com.mitchellh.ghostty",
     "net.kovidgoyal.kitty", "com.github.wez.wezterm", "org.alacritty", "io.alacritty",
+    "co.zeit.hyper", "org.tabby", "com.microsoft.VSCode", "com.microsoft.VSCodeInsiders",
+    "com.todesktop.230313mzl4w4u92",   # Cursor
 }
+
+
+PRIVACY_PANES = {"mic": "Privacy_Microphone", "ax": "Privacy_Accessibility", "listen": "Privacy_ListenEvent"}
+PRIVACY_NAMES = {"mic": "Microphone", "ax": "Accessibility", "listen": "Input Monitoring"}
+
+
+def mac_perms(prompt=False, wait_mic=False):
+    """Status of the three permissions push-to-talk needs, as {name: True/False}. With prompt=True, also asks
+    macOS to show its permission dialog for each missing one (macOS only ever asks once per app)."""
+    res = {"mic": False, "ax": False, "listen": False}
+    try:
+        from ApplicationServices import AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionPrompt
+
+        res["ax"] = bool(AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: bool(prompt)}))
+    except Exception:  # noqa: BLE001
+        res["ax"] = True   # can't tell: don't block on it
+    try:   # Input Monitoring (macOS 10.15+): without it pynput starts fine but never hears a key
+        import ctypes
+
+        cg = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+        if hasattr(cg, "CGPreflightListenEventAccess"):
+            cg.CGPreflightListenEventAccess.restype = ctypes.c_bool
+            cg.CGRequestListenEventAccess.restype = ctypes.c_bool
+            ok = bool(cg.CGPreflightListenEventAccess())
+            if not ok and prompt:
+                ok = bool(cg.CGRequestListenEventAccess())
+            res["listen"] = ok
+        else:
+            res["listen"] = True
+    except Exception:  # noqa: BLE001
+        res["listen"] = True
+    try:   # Microphone: 0 = not asked yet, 1 = restricted, 2 = denied, 3 = allowed
+        import AVFoundation as av
+
+        st = int(av.AVCaptureDevice.authorizationStatusForMediaType_(av.AVMediaTypeAudio))
+        if st == 0 and prompt:
+            done = threading.Event()
+            av.AVCaptureDevice.requestAccessForMediaType_completionHandler_(av.AVMediaTypeAudio,
+                                                                           lambda granted: done.set())
+            if wait_mic:
+                done.wait(120)
+            st = int(av.AVCaptureDevice.authorizationStatusForMediaType_(av.AVMediaTypeAudio))
+        res["mic"] = st == 3
+    except Exception:  # noqa: BLE001
+        res["mic"] = True   # can't tell: let the recording attempt decide
+    return res
+
+
+def open_privacy_pane(which):
+    import subprocess
+
+    try:
+        subprocess.Popen(["open", "x-apple.systempreferences:com.apple.preference.security?" + PRIVACY_PANES[which]],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+def notify(msg):
+    import subprocess
+
+    try:
+        subprocess.Popen(["osascript", "-e", 'display notification "%s" with title "Terminal Jarvis"' %
+                          msg.replace('"', "'")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+def permissions_cli():
+    """`ears.py --permissions`: interactive check, run from the terminal app you use for Jarvis."""
+    print("  Checking push-to-talk permissions for THIS terminal app...", flush=True)
+    perms = mac_perms(prompt=True, wait_mic=True)
+    missing = [k for k, ok in perms.items() if not ok]
+    if missing:
+        for k in missing:
+            print("  ! %-16s NOT allowed yet" % PRIVACY_NAMES[k], flush=True)
+        print("  Opening System Settings. Switch ON your terminal app (Terminal / iTerm2 / ...) in each list.", flush=True)
+        for k in missing:
+            open_privacy_pane(k)
+            time.sleep(1.2)
+        print("  Waiting up to 2 minutes for you to finish (Ctrl+C to skip)...", flush=True)
+        try:
+            for _ in range(60):
+                time.sleep(2)
+                perms = mac_perms()
+                if all(perms.values()):
+                    break
+        except KeyboardInterrupt:
+            pass
+    for k, ok in perms.items():
+        print("  %s %-16s %s" % ("+" if ok else "!", PRIVACY_NAMES[k], "allowed" if ok else "NOT allowed"), flush=True)
+    if all(perms.values()):
+        print("  All set. Push-to-talk is ready (the background listener restarts itself).", flush=True)
+    else:
+        print("  Still missing. Fix those in System Settings > Privacy & Security, then run:", flush=True)
+        print("    bash ~/.terminal-jarvis/mac/permissions.sh", flush=True)
 
 
 def mac(ears, state, home):
@@ -372,15 +473,17 @@ def mac(ears, state, home):
     with open(os.path.join(home, "ears.pid"), "w") as f:
         f.write(str(os.getpid()))
 
-    # Accessibility lets us type into the terminal (and see the key). Ask macOS to show its prompt once.
-    try:
-        from ApplicationServices import AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionPrompt
-
-        if not AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True}):
-            log("not trusted yet: allow your terminal app in System Settings > Privacy & Security > "
-                "Accessibility and Input Monitoring, then reopen it")
-    except Exception as e:  # noqa: BLE001
-        log("accessibility check skipped: %s" % e)
+    # Microphone + Accessibility (type the words) + Input Monitoring (hear the key). Ask for what's missing and
+    # tell the user, instead of silently doing nothing.
+    perms = mac_perms(prompt=True)
+    missing0 = {k for k, ok in perms.items() if not ok}
+    if missing0:
+        names = ", ".join(PRIVACY_NAMES[k] for k in sorted(missing0))
+        log("permissions missing: %s. Turn your terminal app ON under System Settings > Privacy & Security" % names)
+        notify("Push-to-talk needs permission (%s) for your terminal app. Opening System Settings." % names)
+        for k in sorted(missing0):
+            open_privacy_pane(k)
+            time.sleep(1.2)
 
     keymap = {"rightoption": keyboard.Key.alt_r, "rightalt": keyboard.Key.alt_r, "rightcmd": keyboard.Key.cmd_r,
               "rightctrl": keyboard.Key.ctrl_r, "f8": keyboard.Key.f8, "f9": keyboard.Key.f9}
@@ -446,6 +549,13 @@ def mac(ears, state, home):
         front = front_bundle()
         log("ptt: key down (front app %s)" % (front or "unknown"))
         if front in TERMINALS:
+            if not mac_perms()["mic"]:
+                log("microphone not allowed for your terminal app")
+                notify("Allow the Microphone for your terminal app in System Settings > Privacy & Security.")
+                open_privacy_pane("mic")
+                chime("Basso")
+                held["down"] = False
+                return
             try:
                 ears.start()
                 held["active"] = True
@@ -462,8 +572,12 @@ def mac(ears, state, home):
             threading.Thread(target=finish, daemon=True).start()
 
     threading.Thread(target=ears.load, daemon=True).start()
-    listener = keyboard.Listener(on_press=on_press, on_release=on_release)
-    listener.start()
+    def new_listener():
+        lst = keyboard.Listener(on_press=on_press, on_release=on_release)
+        lst.start()
+        return lst
+
+    listener = new_listener()
     log("listening for %s (model %s)" % (name, ears.model_name))
 
     # Quit ~20 s after the last Jarvis session closes (launch.sh keeps a pid file per session).
@@ -471,6 +585,23 @@ def mac(ears, state, home):
     last_seen = time.time()
     while True:
         time.sleep(3)
+        # Key/typing permissions are only read when a process starts: once they've been granted, restart this
+        # engine in place so the user doesn't have to do anything.
+        if missing0 & {"ax", "listen"}:
+            now = mac_perms()
+            if all(now[k] for k in missing0 & {"ax", "listen"}):
+                log("permissions granted; restarting the listener")
+                try:
+                    listener.stop()
+                except Exception:
+                    pass
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+        if not listener.is_alive():
+            log("key listener stopped; restarting it")
+            try:
+                listener = new_listener()
+            except Exception as e:  # noqa: BLE001
+                log("could not restart the key listener: %s" % e)
         alive = False
         try:
             for fn in os.listdir(sessions):
@@ -505,6 +636,7 @@ def main():
     g.add_argument("--warmup", action="store_true")
     g.add_argument("--serve", action="store_true")
     g.add_argument("--mac", action="store_true")
+    g.add_argument("--permissions", action="store_true", help="macOS: request/check the permissions push-to-talk needs")
     g.add_argument("--test", action="store_true", help="record 4 s from the default mic and show what was heard")
     a = ap.parse_args()
     home = os.path.dirname(os.path.abspath(a.state))
@@ -521,6 +653,8 @@ def main():
 
         list(ears.model.transcribe(np.zeros(RATE, dtype="float32"), language="en")[0])
         print("READY", flush=True)
+    elif a.permissions:
+        permissions_cli()
     elif a.test:
         selftest(ears, a.state)
     elif a.serve:

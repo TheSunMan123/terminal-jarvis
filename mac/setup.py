@@ -350,6 +350,14 @@ def install(a):
             say("  + Push-to-talk: hold %s (see the one-time permissions below)" % key.upper(), GREEN)
 
     save_state(state)
+    if state["ptt_key"] != "none":
+        # ask for the permissions NOW, from this terminal, so macOS attributes them to the terminal app
+        # (a background process often never gets its prompts shown, which is how push-to-talk ended up silent)
+        say("")
+        say("  Push-to-talk permissions: macOS will ask now. Click Allow, and switch this terminal app ON in the", YEL)
+        say("  Accessibility and Input Monitoring lists when System Settings opens.", YEL)
+        subprocess.run([a.uv, "run", "--quiet", "--script", os.path.join(TJ, "voice", "ears.py"), "--permissions",
+                        "--state", STATE])
     say("")
     say("  %s is online, %s. Open a NEW terminal window (or tab) and type  codex" % (assistant, address), "\033[97m")
     say("  ONE-TIME STEPS:", YEL)
@@ -360,7 +368,8 @@ def install(a):
     if state["ptt_key"] != "none":
         say("   %d. Push-to-talk: the first time you hold the key, macOS asks for permissions for your terminal app" % n, YEL)
         say("      (Terminal or iTerm2). Allow the Microphone, then in System Settings > Privacy & Security turn it on", YEL)
-        say("      under Accessibility AND Input Monitoring. Quit and reopen the terminal app afterwards.", YEL)
+        say("      under Accessibility AND Input Monitoring. Anything missing? Run (in that same terminal app):", YEL)
+        say("        bash ~/.terminal-jarvis/mac/permissions.sh", YEL)
     if not state["iterm"]:
         say("  Tip: in iTerm2 you also get the backdrop with the J. Terminal.app gets the colours only.", DIM)
     say("  Undo everything:  bash ~/.terminal-jarvis/mac/uninstall.sh", DIM)
